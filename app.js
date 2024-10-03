@@ -1,59 +1,279 @@
-import 'dotenv/config';
-import express from 'express';
+import "dotenv/config";
+import express from "express";
 import {
   InteractionType,
   InteractionResponseType,
   verifyKeyMiddleware,
-} from 'discord-interactions';
-import { getRandomEmoji } from './utils.js';
+} from "discord-interactions";
+import { getRandomEmoji, DiscordRequest } from "./utils.js";
+import { setTimeout } from "timers/promises";
+
+/**
+ * @typedef {Object} Stats
+ * @property {number} daysPlayed
+ * @property {number} score
+ *
+ * @typedef {Object.<string, Stats>} UserStatsMap
+ *
+ * @typedef {Object} FramedResults
+ * @property {number} failedAttempts
+ *
+ * @typedef {Object.<number, FramedResults>} UserHistory
+ * A collection of days mapped to the user's score for that day
+ *
+ * @typedef {Object.<string, UserHistory} UserHistories
+ * The key is the userId
+ */
+
+/**
+ * @typedef {Object} Message
+ * @property {string} id
+ * @property {string} content
+ * @property {Object} author
+ * @property {string} author.id
+ * @property {string} author.username
+ * @property {string} author.global_name // User's nickname within the server
+ * 
+ * sample message
+ * {
+    type: 20,
+    content: 'hello world 👋',
+    mentions: [],
+    mention_roles: [],
+    attachments: [],
+    embeds: [],
+    timestamp: '2024-09-27T00:45:34.417000+00:00',
+    edited_timestamp: null,
+    flags: 0,
+    components: [],
+    id: '1289025106915622934',
+    channel_id: '1289022276636774404',
+    author: {
+      id: '1286835367974277120',
+      username: 'Framed Stats Bot',
+      avatar: null,
+      discriminator: '8724',
+      public_flags: 524288,
+      flags: 524288,
+      bot: true,
+      banner: null,
+      accent_color: null,
+      global_name: null,
+      avatar_decoration_data: null,
+      banner_color: null,
+      clan: null
+    },
+    pinned: false,
+    mention_everyone: false,
+    tts: false,
+    application_id: '1286835367974277120',
+    interaction: {
+      id: '1289025105820909682',
+      type: 2,
+      name: 'test',
+      user: [Object]
+    },
+    webhook_id: '1286835367974277120',
+    position: 0,
+    interaction_metadata: {
+      id: '1289025105820909682',
+      type: 2,
+      user: [Object],
+      authorizing_integration_owners: [Object],
+      name: 'test',
+      command_type: 1
+    }
+  },
+ */
 
 // Create an express app
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
 
+const FRAMED_MESSAGE_START = "Framed #";
+
 /**
  * Interactions endpoint URL where Discord will send HTTP requests
  * Parse request body and verifies incoming requests using discord-interactions package
  */
-app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async function (req, res) {
-  // Interaction type and data
-  const { type, data } = req.body;
+app.post(
+  "/interactions",
+  verifyKeyMiddleware(process.env.PUBLIC_KEY),
+  async function (req, res) {
+    console.log("Handling interaction");
+    // Interaction type and data
+    const { channel, type, data } = req.body;
+    console.log(`Interaction type: ${type}`);
 
-  /**
-   * Handle verification requests
-   */
-  if (type === InteractionType.PING) {
-    return res.send({ type: InteractionResponseType.PONG });
-  }
+    /**
+     * Handle verification requests
+     */
+    if (type === InteractionType.PING) {
+      return res.send({ type: InteractionResponseType.PONG });
+    }
 
-  /**
-   * Handle slash command requests
-   * See https://discord.com/developers/docs/interactions/application-commands#slash-commands
-   */
-  if (type === InteractionType.APPLICATION_COMMAND) {
-    const { name } = data;
-
-    // "test" command
-    if (name === 'test') {
-      // Send a message into the channel where command was triggered from
+    if (type === InteractionType.MESSAGE_COMPONENT) {
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
-          // Fetches a random emoji to send from a helper function
-          content: `hello world ${getRandomEmoji()}`,
+          content: "I saw your message",
         },
       });
     }
 
-    console.error(`unknown command: ${name}`);
-    return res.status(400).json({ error: 'unknown command' });
+    /**
+     * Handle slash command requests
+     * See https://discord.com/developers/docs/interactions/application-commands#slash-commands
+     */
+    if (type === InteractionType.APPLICATION_COMMAND) {
+      const { name } = data;
+
+      // "test" command
+      if (name === "test") {
+        // Send a message into the channel where command was triggered from
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            // Fetches a random emoji to send from a helper function
+            content: `hello world ${getRandomEmoji()}`,
+          },
+        });
+      }
+
+      if (name === "stats") {
+        await handleStatsCommand(req, res);
+        return;
+      }
+
+      console.error(`unknown command: ${name}`);
+      return res.status(400).json({ error: "unknown command" });
+    }
+
+    console.error("unknown interaction type", type);
+    return res.status(400).json({ error: "unknown interaction type" });
+  }
+);
+
+async function handleStatsCommand(req, res) {
+  console.log("Handling score command");
+  /** @type {UserHistories} */
+  let allUserHistories = {}; // The key is the userId
+  const userIdsToName = {};
+  const { channel, type, data } = req.body;
+
+  let earliestDiscoveredMessage = channel.last_message_id;
+  /** @type { Array<Message> } */
+  let messages;
+  do {
+    const messagesResponse = await DiscordRequest(
+      `/channels/${channel.id}/messages?before=${earliestDiscoveredMessage}&limit=100`,
+      {}
+    );
+    messages = await messagesResponse.json();
+    if (messages.length === 0) break;
+    for (const message of messages) {
+      if (message.content.startsWith(FRAMED_MESSAGE_START)) {
+        console.log("Framed message detected");
+        allUserHistories = updateUserHistories(allUserHistories, message);
+        userIdsToName[message.author.id] = [message.author.global_name];
+      }
+    }
+    earliestDiscoveredMessage = messages[messages.length - 1].id;
+  } while (messages.length > 0);
+
+  const stats = constructStats(allUserHistories);
+
+  const responseMessageContent = constructStatsMessage(stats, userIdsToName);
+
+  res.send({
+    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      content: responseMessageContent,
+    },
+  });
+  res.end();
+}
+
+/**
+ * @param {UserHistories} userHistories
+ * @param {Message} message
+ * @returns {UserHistories} updatedUserHistories
+ */
+function updateUserHistories(userHistories, message) {
+  let updatedUserHistories = Object.assign({}, userHistories);
+
+  const regex = new RegExp(`^${FRAMED_MESSAGE_START}(\\d+)`);
+  const regexMatches = regex.exec(message.content);
+  const day = parseInt(regexMatches[1]);
+
+  const failedAttempts = (message.content.match(/🟥/g) || []).length;
+  // console.log(`Failed Attempts: ${failedAttempts}`);
+
+  // const succeeded = message.content.includes("🟩");
+  // console.log(`Succeeded: ${succeeded}`);
+
+  if (!updatedUserHistories[message.author.id]) {
+    updatedUserHistories[message.author.id] = {};
   }
 
-  console.error('unknown interaction type', type);
-  return res.status(400).json({ error: 'unknown interaction type' });
-});
+  updatedUserHistories[message.author.id][day] = {
+    failedAttempts,
+  };
+
+  return updatedUserHistories;
+}
+
+/**
+ *
+ * @param {UserHistories} userHistories
+ * @returns {UserStatsMap}
+ */
+function constructStats(userHistories) {
+  /** @type {UserStatsMap} */
+  let allUserStats = {};
+  const userIds = Object.keys(userHistories);
+  for (const userId of userIds) {
+    const userHistory = userHistories[userId];
+    const userStats = emptyStats();
+    for (const day of Object.keys(userHistory)) {
+      userStats.daysPlayed++;
+      userStats.score += 6 - userHistory[day].failedAttempts;
+    }
+    allUserStats[userId] = userStats;
+  }
+  return allUserStats;
+}
+
+/**
+ *
+ * @param {UserStatsMap} stats
+ * @param {Object.<string, string>} userIdsToNames
+ * @returns {string}
+ */
+function constructStatsMessage(stats, userIdsToNames) {
+  let responseContent = "Scores:\n";
+  for (const userId of Object.keys(stats)) {
+    const username = userIdsToNames[userId];
+    responseContent +=
+      `\n${username}: \n` +
+      `    score: ${stats[userId].score}\n` +
+      `    days played: ${stats[userId].daysPlayed}\n`;
+  }
+  return responseContent;
+}
+
+/**
+ *
+ * @returns {Stats}
+ */
+function emptyStats() {
+  return {
+    daysPlayed: 0,
+    score: 0,
+  };
+}
 
 app.listen(PORT, () => {
-  console.log('Listening on port', PORT);
+  console.log("Listening on port", PORT);
 });
