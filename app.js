@@ -9,6 +9,18 @@ import { getRandomEmoji, DiscordRequest } from "./utils.js";
 import { setTimeout } from "timers/promises";
 
 /**
+ * https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object
+ * @typedef {Object} InteractionPayload
+ * @property {string} token
+ * @property {string} id - Interaction Id
+ * @property {Object} data - Data about the interaction
+ * @property {String} data.id
+ * @property {String} data.name
+ * @property {number} data.type
+ * @property {number} type
+ * @property {string} channel_id
+ * @property {string} application_id
+ *
  * @typedef {Object} Stats
  * @property {number} daysPlayed
  * @property {number} score
@@ -33,6 +45,9 @@ import { setTimeout } from "timers/promises";
  * @property {string} author.id
  * @property {string} author.username
  * @property {string} author.global_name // User's nickname within the server
+ * @property {Object} interaction
+ * @property {string} interaction.id
+ * @property {string} interaction.token
  * 
  * sample message
  * {
@@ -102,8 +117,10 @@ app.post(
   verifyKeyMiddleware(process.env.PUBLIC_KEY),
   async function (req, res) {
     console.log("Handling interaction");
+    /** @type {InteractionPayload} */
+    const payload = req.body;
     // Interaction type and data
-    const { channel, type, data } = req.body;
+    const { channel, type, data } = payload;
     console.log(`Interaction type: ${type}`);
 
     /**
@@ -157,10 +174,18 @@ app.post(
 
 async function handleStatsCommand(req, res) {
   console.log("Handling score command");
+  await res.send({
+    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+  });
+  await res.end();
+  console.log("Deferred message response sent to Discord");
+
   /** @type {UserHistories} */
   let allUserHistories = {}; // The key is the userId
   const userIdsToName = {};
-  const { channel, type, data } = req.body;
+  /** @type {InteractionPayload} */
+  const payload = req.body;
+  const { channel } = payload;
 
   let earliestDiscoveredMessage = channel.last_message_id;
   /** @type { Array<Message> } */
@@ -180,19 +205,32 @@ async function handleStatsCommand(req, res) {
       }
     }
     earliestDiscoveredMessage = messages[messages.length - 1].id;
+
+    const rateLimitRemaining = parseInt(
+      messagesResponse.headers.get("x-ratelimit-remaining")
+    );
+    const rateLimitResetAfter = parseFloat(
+      messagesResponse.headers.get("x-ratelimit-reset-after")
+    );
+    if (rateLimitRemaining <= 0) {
+      const timeout = rateLimitResetAfter * 1000;
+      console.log(`Rate limit reached. Sleeping for ${timeout} ms`);
+      await setTimeout(timeout);
+    }
   } while (messages.length > 0);
 
   const stats = constructStats(allUserHistories);
 
   const responseMessageContent = constructStatsMessage(stats, userIdsToName);
 
-  res.send({
-    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: {
+  console.log("Sending patch request to discord");
+  const callbackEndpoint = `webhooks/${payload.application_id}/${payload.token}/messages/@original`;
+  const response = await DiscordRequest(callbackEndpoint, {
+    method: "PATCH",
+    body: {
       content: responseMessageContent,
     },
   });
-  res.end();
 }
 
 /**
