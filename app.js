@@ -179,6 +179,8 @@ app.post(
 
 app.post("/process-stats-interaction", jsonParser, async function (req, res) {
   console.log("Handling /process-stats-interaction request");
+  // Await to allow caller to finish processing Discord request
+  await setTimeout(1000);
   /** @type {UserHistories} */
   let allUserHistories = {}; // The key is the userId
   const userIdsToName = {};
@@ -259,6 +261,7 @@ async function handleStatsCommand(req, res) {
     },
     body: JSON.stringify(req.body),
   });
+  // Allow fetch request time to send out http request
   const timeoutPromise = setTimeout(1000, "TIMEOUT");
 
   const result = await Promise.race([responsePromise, timeoutPromise]);
