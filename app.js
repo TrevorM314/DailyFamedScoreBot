@@ -8,6 +8,9 @@ import {
 import { getRandomEmoji, DiscordRequest } from "./utils.js";
 import { setTimeout } from "timers/promises";
 import serverless from "serverless-http";
+import bodyParser from "body-parser";
+
+const jsonParser = bodyParser.json();
 
 /**
  * https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object
@@ -106,6 +109,8 @@ import serverless from "serverless-http";
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
+const LOCAL = process.env.LOCAL && process.env.LOCAL.toLowerCase() === "true";
+const SERVER_URL = LOCAL ? "http://localhost:3000" : process.env.SERVER_URL;
 
 const FRAMED_MESSAGE_START = "Framed #";
 
@@ -160,8 +165,7 @@ app.post(
       }
 
       if (name === "stats") {
-        await handleStatsCommand(req, res);
-        return;
+        return handleStatsCommand(req, res);
       }
 
       console.error(`unknown command: ${name}`);
@@ -173,20 +177,8 @@ app.post(
   }
 );
 
-app.get("/ping", async function (req, res) {
-  return res.send({
-    message: "pong",
-  });
-});
-
-async function handleStatsCommand(req, res) {
-  console.log("Handling score command");
-  await res.send({
-    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-  });
-  await res.end();
-  console.log("Deferred message response sent to Discord");
-
+app.post("/process-stats-interaction", jsonParser, async function (req, res) {
+  console.log("Handling /process-stats-interaction request");
   /** @type {UserHistories} */
   let allUserHistories = {}; // The key is the userId
   const userIdsToName = {};
@@ -237,6 +229,48 @@ async function handleStatsCommand(req, res) {
     body: {
       content: responseMessageContent,
     },
+  });
+
+  res.send({
+    success: true,
+  });
+});
+
+app.post("/test", jsonParser, async function (req, res) {
+  console.log("Handling test");
+  console.log(req.body);
+});
+
+app.get("/ping", async function (req, res) {
+  return res.send({
+    message: "pong",
+  });
+});
+
+async function handleStatsCommand(req, res) {
+  // do NOT await. This sends to lambda for async processing without needing a stream.
+  const processingUrl = `${SERVER_URL}/process-stats-interaction`;
+  console.log(`Sending process request to lambda at ${processingUrl}`);
+  const responsePromise = fetch(processingUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req.body),
+  });
+  const timeoutPromise = setTimeout(1000, "TIMEOUT");
+
+  const result = await Promise.race([responsePromise, timeoutPromise]);
+  if (result == "TIMEOUT") {
+    console.log("Request timed out. Continuing to process async");
+  } else {
+    console.log("Response received");
+  }
+
+  console.log("Responding with deferred message");
+  return res.send({
+    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
   });
 }
 
@@ -319,8 +353,10 @@ function emptyStats() {
   };
 }
 
-// app.listen(PORT, () => {
-//   console.log("Listening on port", PORT);
-// });
+// if (LOCAL) {
+//   app.listen(PORT, () => {
+//     console.log("Listening on port", PORT);
+//   });
+// }
 
 export default serverless(app);
