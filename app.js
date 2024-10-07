@@ -7,6 +7,7 @@ import {
 } from "discord-interactions";
 import { getRandomEmoji, DiscordRequest } from "./utils.js";
 import { setTimeout } from "timers/promises";
+import serverless from "serverless-http";
 
 /**
  * https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object
@@ -172,6 +173,12 @@ app.post(
   }
 );
 
+app.get("/ping", async function (req, res) {
+  return res.send({
+    message: "pong",
+  });
+});
+
 async function handleStatsCommand(req, res) {
   console.log("Handling score command");
   await res.send({
@@ -312,6 +319,8 @@ function emptyStats() {
   };
 }
 
-app.listen(PORT, () => {
-  console.log("Listening on port", PORT);
-});
+// app.listen(PORT, () => {
+//   console.log("Listening on port", PORT);
+// });
+
+export default serverless(app);
